@@ -2,18 +2,11 @@ services:
   - type: web
     name: wastewater-ai-agents
     runtime: python
-    repo: https://github.com/your-username/your-repo
-    plan: free
-    region: oregon
+    pythonVersion: 3.11.0
+
     buildCommand: |
       pip install -r requirements.txt
       python -c "from training.train_anomaly import train_and_test_model; train_and_test_model()"
       python -c "from training.train_classification import train_classification_model; train_classification_model()"
+
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.0
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: USE_ML_MODELS
-        value: true
