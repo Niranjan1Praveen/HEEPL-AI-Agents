@@ -4,12 +4,7 @@ LLM Agent - Natural Language Generation
 This agent converts analysis results into human-readable insights
 using Google's Gemini API (free tier).
 
-Features:
-- Industry-specific insights
-- Severity-based language
-- Actionable recommendations
-- Multi-language support (configurable)
-- Fallback templates if API fails
+Uses the new google.genai package (replaces deprecated google.generativeai)
 """
 
 import os
@@ -22,11 +17,12 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    import google.generativeai as genai
-    GEMINI_AVAILABLE = True
+    from google import genai
+    from google.genai import types
+    GENAI_AVAILABLE = True
 except ImportError:
-    GEMINI_AVAILABLE = False
-    print("⚠️ Google Generative AI not installed. Run: pip install google-generativeai")
+    GENAI_AVAILABLE = False
+    print("⚠️ Google GenAI not installed. Run: pip install google-genai")
 
 # Optional: Load environment variables
 try:
@@ -50,8 +46,18 @@ class LLMAgent:
     """
     LLM Agent for generating natural language insights from analysis results
     
-    Uses Gemini 1.5 Flash (free) for cost-effective, fast responses
+    Uses Gemini 2.0 Flash (free) for cost-effective, fast responses
     """
+    
+    # List of model names to try (in order of preference)
+    MODEL_NAMES = [
+        "models/gemini-2.0-flash",        # Fast, good for text generation
+        "models/gemini-2.5-flash",        # Newer version
+        "models/gemini-2.0-flash-001",    # Specific version
+        "models/gemini-flash-latest",     # Latest flash version
+        "models/gemini-2.5-pro",          # More capable (if needed)
+        "models/gemini-pro-latest",       # Latest pro version
+    ]
     
     # Pre-defined templates for fallback (if API fails)
     SEVERITY_TEMPLATES = {
@@ -77,31 +83,60 @@ class LLMAgent:
         }
     }
     
-    def __init__(self, api_key: str = None, model_name: str = "gemini-1.5-flash"):
+    def __init__(self, api_key: str = None, model_name: str = None):
         """
         Initialize LLM Agent
         
         Args:
             api_key: Gemini API key (if None, tries env variable GEMINI_API_KEY)
-            model_name: Gemini model to use (default: gemini-1.5-flash - free tier)
+            model_name: Gemini model to use (auto-detected if None)
         """
-        self.model_name = model_name
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
-        self.model = None
+        self.client = None
+        self.model_name = None
         
-        if GEMINI_AVAILABLE and self.api_key:
+        if GENAI_AVAILABLE and self.api_key:
             try:
-                genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel(model_name)
-                print(f"✅ LLM Agent initialized with {model_name}")
+                self.client = genai.Client(api_key=self.api_key)
+                
+                # Try to find a working model
+                if model_name:
+                    self.model_name = model_name
+                else:
+                    self.model_name = self._find_working_model()
+                
+                if self.model_name:
+                    print(f"✅ LLM Agent initialized with {self.model_name}")
+                else:
+                    print(f"⚠️ No working model found. Using fallback templates.")
+                    self.client = None
+                    
             except Exception as e:
                 print(f"⚠️ Failed to initialize Gemini: {e}")
-                self.model = None
+                self.client = None
         else:
             print("⚠️ Gemini not available. Using fallback templates.")
         
         # Industry-specific context (for better responses)
         self.industry_context = self._load_industry_context()
+    
+    def _find_working_model(self) -> Optional[str]:
+        """Find a working Gemini model"""
+        for model_name in self.MODEL_NAMES:
+            try:
+                # Try a simple test generation
+                response = self.client.models.generate_content(
+                    model=model_name,
+                    contents="Test"
+                )
+                if response and response.text:
+                    print(f"✅ Found working model: {model_name}")
+                    return model_name
+            except Exception as e:
+                print(f"   Model {model_name} failed: {e}")
+                continue
+        
+        return None
     
     def _load_industry_context(self) -> Dict:
         """Load industry-specific context for better insights"""
@@ -145,7 +180,6 @@ class LLMAgent:
     
     def _get_industry_context(self, industry_id: str) -> Dict:
         """Get context for a specific industry"""
-        # Try exact match, then partial match
         for key, context in self.industry_context.items():
             if key in industry_id.lower() or industry_id.lower() in key:
                 return context
@@ -173,7 +207,7 @@ class LLMAgent:
         severity = self._determine_severity(analysis_result)
         
         # Try Gemini API first
-        if self.model:
+        if self.client and self.model_name:
             try:
                 return self._generate_with_gemini(analysis_result, industry_context, severity)
             except Exception as e:
@@ -221,7 +255,11 @@ class LLMAgent:
         prompt = self._build_prompt(result, industry_context, severity)
         
         # Call Gemini
-        response = self.model.generate_content(prompt)
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=prompt
+        )
+        
         raw_text = response.text
         
         # Parse response
@@ -428,7 +466,7 @@ Keep the language professional but accessible. Focus on actionable insights.
         anomaly_count = sum(1 for r in results if r.get('is_anomaly'))
         
         # Build prompt for batch summary
-        if self.model:
+        if self.client and self.model_name:
             prompt = f"""Generate a brief summary report for {total} wastewater samples from {industry_id or 'industrial'} facility.
 
 Statistics:
@@ -440,7 +478,10 @@ Statistics:
 Provide a 2-3 sentence executive summary of the overall water quality status.
 """
             try:
-                response = self.model.generate_content(prompt)
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt
+                )
                 return response.text
             except Exception as e:
                 print(f"⚠️ Batch summary failed: {e}")
