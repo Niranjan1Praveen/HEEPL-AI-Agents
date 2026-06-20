@@ -4,19 +4,14 @@ Anomaly Detection Model for Industrial Wastewater Data
 This model uses Isolation Forest algorithm to detect anomalies in wastewater parameters.
 Isolation Forest works by randomly isolating observations - anomalies are easier to isolate
 because they are few and different from normal data points.
-
-Why Isolation Forest for wastewater data?
-1. Handles high-dimensional data (multiple parameters like BOD, COD, pH, etc.)
-2. Robust to outliers in training data
-3. Doesn't assume normal distribution of data
-4. Works well with mixed parameter ranges (mg/L, pH, temperature)
 """
 
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
 import joblib
 from pathlib import Path
 import sys
@@ -29,16 +24,7 @@ from utils.csv_loader import CSVLoader
 
 class AnomalyDetector:
     """
-    Anomaly Detection using Isolation Forest Algorithm
-    
-    How Isolation Forest works:
-    1. Randomly selects a feature (e.g., BOD level)
-    2. Randomly selects a split value between min and max of that feature
-    3. Recursively partitions the data until each point is isolated
-    4. Anomalies require fewer splits to isolate (shorter paths)
-    5. Normal points require more splits (longer paths)
-    
-    Contamination parameter: Expected proportion of anomalies in the dataset
+    Anomaly Detection using Isolation Forest Algorithm wrapped in an sklearn Pipeline.
     """
     
     def __init__(self, contamination=0.1, random_state=42):
@@ -47,19 +33,21 @@ class AnomalyDetector:
             contamination: Expected proportion of anomalies (0.1 = 10%)
             random_state: For reproducible results
         """
-        self.model = IsolationForest(
-            contamination=contamination,
-            random_state=random_state,
-            n_estimators=100,  # Number of trees in the forest
-            max_samples='auto',  # Number of samples per tree
-            bootstrap=False  # No bootstrap sampling
-        )
-        self.scaler = StandardScaler()
-        self.feature_columns = None
         self.contamination = contamination
+        self.random_state = random_state
+        self.feature_columns = None
+        self.pipeline = None
         
-    def prepare_features(self, df):
-        """Extract and normalize features for training - handles missing columns"""
+        # Estimators for compatibility
+        self.model = None
+        self.scaler = None
+        self.imputer = None
+        
+    def train(self, df):
+        """Train the anomaly detection pipeline"""
+        print("\n" + "="*60)
+        print("🏋️ TRAINING ANOMALY DETECTION PIPELINE")
+        print("="*60)
         
         # Define all possible features
         all_features = [
@@ -73,68 +61,72 @@ class AnomalyDetector:
         self.feature_columns = available_features
         
         if len(available_features) < 3:
-            print(f"⚠️ Warning: Only {len(available_features)} features available. Minimum 3 required.")
-            # Use whatever is available
+            print(f"⚠️ Warning: Only {len(available_features)} features available.")
         else:
             print(f"📋 Using features: {available_features}")
-        
-        # Extract features
+            
         X = df[available_features].values
         
-        # Fill any NaN values with column means
-        from sklearn.impute import SimpleImputer
-        imputer = SimpleImputer(strategy='mean')
-        X = imputer.fit_transform(X)
-        
-        # Normalize features
-        X_scaled = self.scaler.fit_transform(X)
-        
-        return X_scaled
-    
-    def train(self, df):
-        """Train the anomaly detection model"""
-        print("\n" + "="*60)
-        print("🏋️ TRAINING ANOMALY DETECTION MODEL")
-        print("="*60)
-        
-        # Prepare features
-        X = self.prepare_features(df)
+        # Build Pipeline
+        self.pipeline = Pipeline([
+            ('imputer', SimpleImputer(strategy='mean')),
+            ('scaler', StandardScaler()),
+            ('model', IsolationForest(
+                contamination=self.contamination,
+                random_state=self.random_state,
+                n_estimators=100,
+                max_samples='auto',
+                bootstrap=False
+            ))
+        ])
         
         print(f"\n📊 Training Data Shape: {X.shape}")
-        print(f"📋 Features Used: {self.feature_columns}")
         print(f"🎯 Expected Contamination Rate: {self.contamination * 100}%")
         
-        # Train the model
-        self.model.fit(X)
+        # Fit the pipeline
+        self.pipeline.fit(X)
+        
+        # Keep references for backward compatibility
+        self.model = self.pipeline.named_steps['model']
+        self.scaler = self.pipeline.named_steps['scaler']
+        self.imputer = self.pipeline.named_steps['imputer']
         
         # Evaluate on training data
-        predictions = self.model.predict(X)
+        predictions, scores = self.predict(df)
         anomaly_count = sum(predictions == -1)
         anomaly_rate = anomaly_count / len(predictions)
         
         print(f"\n📈 Training Results:")
         print(f"   ✅ Normal samples: {sum(predictions == 1)} ({100 - anomaly_rate*100:.1f}%)")
         print(f"   ⚠️ Anomalies detected: {anomaly_count} ({anomaly_rate*100:.1f}%)")
-        
-        # Get anomaly scores (lower = more anomalous)
-        scores = self.model.score_samples(X)
         print(f"   📊 Anomaly scores range: {scores.min():.2f} to {scores.max():.2f}")
+        print(f"   📊 Mean anomaly score: {scores.mean():.4f} (StdDev: {scores.std():.4f})")
         
+        # Calculate training metrics: correlation of each feature with the anomaly score
+        # Highly negative correlation means higher parameter value corresponds to lower score (more anomalous)
+        print(f"\n🔑 Feature Impact on Anomaly Score:")
+        imputed_X = self.imputer.transform(X)
+        for i, col in enumerate(self.feature_columns):
+            corr = np.corrcoef(imputed_X[:, i], scores)[0, 1]
+            print(f"   • {col:<22}: Correlation = {corr:+.4f} ({'Anomalous at High values' if corr < 0 else 'Normal/Low impact'})")
+            
         return self
     
     def predict(self, df):
-        """Predict anomalies in new data"""
-        if self.feature_columns is None:
-            raise ValueError("Model not trained yet. Call train() first.")
+        """Predict anomalies in new data using the pipeline"""
+        if self.pipeline is None:
+            raise ValueError("Model not trained yet. Call train() or load_model() first.")
+            
+        X = df[self.feature_columns].values
         
-        # Prepare features
-        X = self.prepare_features(df)
+        # Pipeline prediction (-1 = anomaly, 1 = normal)
+        predictions = self.pipeline.predict(X)
         
-        # Predict (-1 = anomaly, 1 = normal)
-        predictions = self.model.predict(X)
-        
-        # Get anomaly scores (negative = more anomalous)
-        scores = self.model.score_samples(X)
+        # Get anomaly scores (need to pass through preprocessing first)
+        X_preprocessed = self.pipeline.named_steps['scaler'].transform(
+            self.pipeline.named_steps['imputer'].transform(X)
+        )
+        scores = self.pipeline.named_steps['model'].score_samples(X_preprocessed)
         
         return predictions, scores
     
@@ -154,24 +146,36 @@ class AnomalyDetector:
         return results
     
     def save_model(self, path):
-        """Save the trained model to disk"""
+        """Save the trained model and pipeline to disk"""
         model_data = {
+            'pipeline': self.pipeline,
             'model': self.model,
             'scaler': self.scaler,
+            'imputer': self.imputer,
             'feature_columns': self.feature_columns,
             'contamination': self.contamination
         }
         joblib.dump(model_data, path)
-        print(f"✅ Model saved to: {path}")
+        print(f"✅ Model and Pipeline saved to: {path}")
     
     def load_model(self, path):
         """Load a trained model from disk"""
         model_data = joblib.load(path)
-        self.model = model_data['model']
-        self.scaler = model_data['scaler']
-        self.feature_columns = model_data['feature_columns']
-        self.contamination = model_data['contamination']
-        print(f"✅ Model loaded from: {path}")
+        self.pipeline = model_data.get('pipeline')
+        self.model = model_data.get('model')
+        self.scaler = model_data.get('scaler')
+        self.imputer = model_data.get('imputer')
+        self.feature_columns = model_data.get('feature_columns')
+        self.contamination = model_data.get('contamination')
+        
+        # Reconstruct pipeline if missing
+        if self.pipeline is None and self.model is not None:
+            self.pipeline = Pipeline([
+                ('imputer', self.imputer),
+                ('scaler', self.scaler),
+                ('model', self.model)
+            ])
+        print(f"✅ Pipeline loaded from: {path}")
     
     def explain_anomaly(self, sample_row):
         """Explain why a specific sample is anomalous"""
@@ -179,31 +183,30 @@ class AnomalyDetector:
             return "Model not trained yet"
         
         # Get feature values
-        features = [sample_row.get(col, 0) for col in self.feature_columns]
+        features = [sample_row.get(col, np.nan) for col in self.feature_columns]
         
-        # Scale and predict
-        X = self.scaler.transform([features])
-        score = self.model.score_samples(X)[0]
-        prediction = self.model.predict(X)[0]
+        # Feed through pipeline components
+        X = np.array(features).reshape(1, -1)
+        X_imputed = self.imputer.transform(X)
+        X_scaled = self.scaler.transform(X_imputed)
         
-        # Calculate deviation for each feature
-        X_unscaled = np.array([features])
+        score = self.model.score_samples(X_scaled)[0]
+        prediction = self.model.predict(X_scaled)[0]
+        
         mean_values = self.scaler.mean_
         std_values = self.scaler.scale_
         
         deviations = []
         for i, col in enumerate(self.feature_columns):
-            value = features[i]
+            value = X_imputed[0, i]
             # Get typical range (mean ± 2 std deviations)
-            typical_min = mean_values[i] - 2 * std_values[i]
-            typical_max = mean_values[i] + 2 * std_values[i]
             actual_scaled = (value - mean_values[i]) / std_values[i]
             
             if abs(actual_scaled) > 2:
                 direction = "high" if actual_scaled > 0 else "low"
                 deviations.append({
                     'parameter': col,
-                    'value': value,
+                    'value': float(value),
                     'deviation': f"Unusually {direction} (z-score: {actual_scaled:.2f})"
                 })
         
@@ -213,10 +216,8 @@ class AnomalyDetector:
             'deviations': deviations
         }
 
-
 def train_and_test_model():
     """Main function to train and test the anomaly detection model"""
-    
     print("\n" + "="*60)
     print("🔍 ANOMALY DETECTION MODEL TRAINING")
     print("="*60)
@@ -224,9 +225,7 @@ def train_and_test_model():
     # 1. Load data
     print("\n📂 Loading wastewater data...")
     loader = CSVLoader()
-    
-    # Load multiple industries for diverse training data
-    industries_to_train = get_all_industry_ids()  # Load all available industries
+    industries_to_train = get_all_industry_ids()
     
     all_data = []
     for industry_id in industries_to_train:
@@ -234,18 +233,16 @@ def train_and_test_model():
         if df is not None:
             df['industry'] = industry_id
             all_data.append(df)
-            print(f"   ✅ Loaded {industry_id}: {len(df)} samples")
-    
+            
     if not all_data:
         print("❌ No data loaded. Check your CSV file paths.")
         return
-    
-    # Combine all data
+        
     combined_df = pd.concat(all_data, ignore_index=True)
     print(f"\n📊 Combined dataset: {len(combined_df)} samples from {len(industries_to_train)} industries")
     
     # 2. Train anomaly detection model
-    detector = AnomalyDetector(contamination=0.15)  # Expect 15% anomalies
+    detector = AnomalyDetector(contamination=0.15)
     detector.train(combined_df)
     
     # 3. Save the model
@@ -253,31 +250,25 @@ def train_and_test_model():
     model_path.parent.mkdir(exist_ok=True)
     detector.save_model(model_path)
     
-    # 4. Test on a specific industry's data
+    # 4. Test on a specific industry's data (dairy)
     print("\n" + "="*60)
     print("🧪 TESTING MODEL ON NEW DATA")
     print("="*60)
     
-    test_industry = "dairy"  # Test on dairy industry
+    test_industry = "dairy"
     test_df = loader.load_industry_data(test_industry)
     
     if test_df is not None:
         print(f"\n📊 Testing on: {test_industry} ({len(test_df)} samples)")
-        
-        # Get predictions
         predictions, scores = detector.predict(test_df)
-        
-        # Add results to dataframe
         test_df['is_anomaly'] = predictions == -1
         test_df['anomaly_score'] = scores
         
-        # Print summary
         anomaly_count = test_df['is_anomaly'].sum()
         print(f"\n📈 Test Results:")
         print(f"   ✅ Normal samples: {len(test_df) - anomaly_count}")
         print(f"   ⚠️ Anomalies detected: {anomaly_count} ({anomaly_count/len(test_df)*100:.1f}%)")
         
-        # Show sample anomalies
         anomalies = test_df[test_df['is_anomaly'] == True]
         if len(anomalies) > 0:
             print(f"\n🔍 Sample Anomalies (first 5):")
@@ -286,11 +277,8 @@ def train_and_test_model():
                 print(f"\n   Sample: {row.get('Sample_ID', 'Unknown')}")
                 print(f"   Status (original): {row.get('Status', 'N/A')}")
                 print(f"   Anomaly Score: {row['anomaly_score']:.2f}")
-                # Show key parameters
-                print(f"   Key Parameters: BOD={row.get('BOD (mg/L)', 'N/A')}, "
-                      f"COD={row.get('COD (mg/L)', 'N/A')}, "
-                      f"pH={row.get('pH', 'N/A')}")
-        
+                print(f"   Key Parameters: BOD={row.get('BOD (mg/L)', 'N/A')}, COD={row.get('COD (mg/L)', 'N/A')}, pH={row.get('pH', 'N/A')}")
+                
         # 5. Explain a specific anomaly
         if len(anomalies) > 0:
             print(f"\n💡 EXPLANATION OF FIRST ANOMALY:")
@@ -306,77 +294,8 @@ def train_and_test_model():
                 print(f"\n   🔍 Deviations detected:")
                 for dev in explanation['deviations']:
                     print(f"      • {dev['parameter']}: {dev['value']} - {dev['deviation']}")
-    
+                    
     return detector
 
-
-def print_model_explanation():
-    """Print detailed explanation of the model"""
-    print("\n" + "="*60)
-    print("📚 MODEL EXPLANATION")
-    print("="*60)
-    
-    print("""
-    🧠 ANOMALY DETECTION MODEL: ISOLATION FOREST
-    
-    WHAT IT DOES:
-    ------------
-    Identifies unusual patterns in wastewater parameters by isolating
-    observations that behave differently from the majority.
-    
-    HOW IT WORKS:
-    ------------
-    1. Randomly selects a parameter (e.g., BOD, COD, pH)
-    2. Randomly picks a value between min and max of that parameter
-    3. Splits the data into two groups based on that value
-    4. Repeats recursively until each point is isolated
-    5. Anomalies require fewer splits (shorter isolation paths)
-    
-    WHY ISOLATION FOREST FOR WASTEWATER DATA:
-    -----------------------------------------
-    ✓ Handles multiple parameter types (mg/L, pH, temperature)
-    ✓ Robust to outliers in training data
-    ✓ No assumption of normal distribution
-    ✓ Works well with real-world industrial data
-    ✓ Interpretable results (can explain why a sample is anomalous)
-    
-    INPUT FEATURES:
-    --------------
-    - BOD (mg/L): Biochemical Oxygen Demand
-    - COD (mg/L): Chemical Oxygen Demand  
-    - TSS (mg/L): Total Suspended Solids
-    - TDS (mg/L): Total Dissolved Solids
-    - pH: Acidity/Alkalinity
-    - Oil & Grease (mg/L)
-    - Ammonia (mg/L)
-    - Conductivity (uS/cm)
-    - Temperature (°C)
-    
-    OUTPUT:
-    -------
-    - Anomaly Score: Negative values indicate anomalies
-    - Classification: -1 (Anomaly) or 1 (Normal)
-    - Confidence level for each prediction
-    
-    PERFORMANCE:
-    -----------
-    - Training Time: ~2-5 seconds (5000 samples)
-    - Inference Time: <0.1 seconds per sample
-    - Memory Usage: ~50-100MB
-    
-    PRACTICAL APPLICATIONS:
-    ----------------------
-    1. Real-time monitoring of treatment plant performance
-    2. Early warning of equipment malfunction
-    3. Identifying samples requiring retesting
-    4. Compliance violation detection
-    5. Process optimization opportunities
-    """)
-
-
 if __name__ == "__main__":
-    # Train and test the model
     detector = train_and_test_model()
-    
-    # Print detailed explanation
-    # print_model_explanation()

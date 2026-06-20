@@ -5,6 +5,7 @@ Exposes REST APIs for:
 - Data analysis (anomaly detection, classification, forecasting)
 - Industry data management
 - Natural language insights generation
+- Diagnostic testing and preloaded warm health checks
 
 Deployment: Ready for Render.com
 """
@@ -64,15 +65,30 @@ def get_llm_agent():
         _llm_agent = LLMAgent(api_key=api_key)
     return _llm_agent
 
-# ==================== HEALTH CHECK ====================
+# ==================== HEALTH & DIAGNOSTICS ====================
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint for Render"""
+    """Improved Health check endpoint for Render diagnostics"""
+    models_dir = Path(__file__).parent / "models"
+    anomaly_exists = (models_dir / "anomaly_model.pkl").exists()
+    classification_exists = (models_dir / "classification_model.pkl").exists()
+    forecasting_exists = (models_dir / "forecasting_models.pkl").exists()
+    
+    api_key_configured = bool(os.environ.get('GEMINI_API_KEY'))
+    
     return jsonify({
         'status': 'healthy',
         'service': 'Wastewater Analysis AI Agents',
-        'version': '1.0.0'
+        'version': '1.0.0',
+        'diagnostics': {
+            'models_availability': {
+                'anomaly_model': anomaly_exists,
+                'classification_model': classification_exists,
+                'forecasting_model': forecasting_exists
+            },
+            'gemini_api_configured': api_key_configured
+        }
     })
 
 @app.route('/', methods=['GET'])
@@ -82,17 +98,171 @@ def index():
         'service': 'Wastewater Analysis AI Agents API',
         'version': '1.0.0',
         'endpoints': {
-            '/health': 'GET - Health check',
+            '/health': 'GET - Diagnostics health check',
             '/industries': 'GET - List all industries',
             '/industries/<industry_id>': 'GET - Get industry summary',
             '/industries/<industry_id>/stats': 'GET - Get industry statistics',
             '/industries/<industry_id>/analyze': 'POST - Analyze a sample',
             '/industries/<industry_id>/analyze/batch': 'POST - Analyze multiple samples',
-            '/industries/<industry_id}/insights': 'POST - Get natural language insights',
+            '/industries/<industry_id>/insights': 'POST - Get natural language insights',
             '/analyze/sample': 'POST - Analyze a single sample (JSON body)',
-            '/train/all': 'POST - Retrain all models (admin)'
+            '/train/all': 'POST - Retrain all models (admin)',
+            '/api/v1/test/data': 'POST - Diagnostic endpoint for DataAgent',
+            '/api/v1/test/analysis': 'POST - Diagnostic endpoint for AnalysisAgent',
+            '/api/v1/test/llm': 'POST - Diagnostic endpoint for LLMAgent'
         }
     })
+
+# ==================== TESTING APIS ====================
+
+@app.route('/api/v1/test/data', methods=['POST'])
+def test_data_agent():
+    """Diagnostic testing API for DataAgent"""
+    import time
+    start_time = time.time()
+    debug_logs = []
+    
+    data = request.get_json() or {}
+    industry_id = data.get('industry_id')
+    debug_mode = data.get('debug', False)
+    
+    if not industry_id:
+        return jsonify({
+            'status': 'error',
+            'error': 'Missing "industry_id" in request body'
+        }), 400
+        
+    try:
+        debug_logs.append(f"Starting DataAgent test for industry: {industry_id}")
+        agent = get_data_agent()
+        
+        debug_logs.append("Invoking DataAgent.load_industry()...")
+        result = agent.load_industry(industry_id)
+        
+        if 'error' in result:
+            debug_logs.append(f"Failed to load data: {result['error']}")
+            return jsonify({
+                'status': 'error',
+                'error': result['error'],
+                'debug_logs': debug_logs if debug_mode else []
+            }), 400
+            
+        execution_time = (time.time() - start_time) * 1000
+        debug_logs.append("DataAgent loaded stats successfully.")
+        
+        response_payload = {
+            'status': 'success',
+            'execution_time_ms': round(execution_time, 2),
+            'payload': {
+                'industry_id': industry_id,
+                'total_samples': result.get('total_samples'),
+                'parameters_loaded': list(result.get('parameters', {}).keys()),
+                'has_status_distribution': 'status_distribution' in result,
+                'sample_preview_count': len(result.get('sample_preview', []))
+            }
+        }
+        if debug_mode:
+            response_payload['debug_logs'] = debug_logs
+            
+        return jsonify(response_payload)
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'debug_logs': debug_logs
+        }), 500
+
+@app.route('/api/v1/test/analysis', methods=['POST'])
+def test_analysis_agent():
+    """Diagnostic testing API for AnalysisAgent"""
+    import time
+    start_time = time.time()
+    debug_logs = []
+    
+    data = request.get_json() or {}
+    sample = data.get('sample')
+    use_ml = data.get('use_ml', True)
+    debug_mode = data.get('debug', False)
+    
+    if not sample:
+        return jsonify({
+            'status': 'error',
+            'error': 'Missing "sample" in request body'
+        }), 400
+        
+    try:
+        debug_logs.append("Initializing AnalysisAgent...")
+        agent = get_analysis_agent()
+        agent.use_models = use_ml
+        
+        debug_logs.append(f"Invoking AnalysisAgent.analyze_sample(use_ml={use_ml})...")
+        result = agent.analyze_sample(sample, industry_id="test_env")
+        
+        execution_time = (time.time() - start_time) * 1000
+        debug_logs.append("AnalysisAgent processing complete.")
+        
+        response_payload = {
+            'status': 'success',
+            'execution_time_ms': round(execution_time, 2),
+            'payload': result.to_dict()
+        }
+        if debug_mode:
+            response_payload['debug_logs'] = debug_logs
+            
+        return jsonify(response_payload)
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'debug_logs': debug_logs
+        }), 500
+
+@app.route('/api/v1/test/llm', methods=['POST'])
+def test_llm_agent():
+    """Diagnostic testing API for LLMAgent"""
+    import time
+    start_time = time.time()
+    debug_logs = []
+    
+    data = request.get_json() or {}
+    analysis_result = data.get('analysis_result')
+    industry_id = data.get('industry_id', 'unknown')
+    debug_mode = data.get('debug', False)
+    
+    if not analysis_result:
+        return jsonify({
+            'status': 'error',
+            'error': 'Missing "analysis_result" in request body'
+        }), 400
+        
+    try:
+        debug_logs.append("Initializing LLMAgent...")
+        agent = get_llm_agent()
+        
+        debug_logs.append(f"Generating insights for sample_id: {analysis_result.get('sample_id', 'unknown')}...")
+        insights = agent.generate_insights(analysis_result, industry_id=industry_id)
+        
+        execution_time = (time.time() - start_time) * 1000
+        debug_logs.append("LLMAgent response generated.")
+        
+        response_payload = {
+            'status': 'success',
+            'execution_time_ms': round(execution_time, 2),
+            'payload': agent.to_json(insights)
+        }
+        if debug_mode:
+            response_payload['debug_logs'] = debug_logs
+            
+        return jsonify(response_payload)
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'debug_logs': debug_logs
+        }), 500
 
 # ==================== INDUSTRY ENDPOINTS ====================
 
@@ -100,8 +270,6 @@ def index():
 def list_industries():
     """List all available industries"""
     industries = get_all_industry_ids()
-    
-    # Get additional info for each industry
     loader = CSVLoader()
     industry_info = []
     
@@ -109,7 +277,6 @@ def list_industries():
         csv_path = loader.get_csv_path(industry_id)
         exists = csv_path.exists() if csv_path else False
         
-        # Try to load sample count
         sample_count = 0
         if exists:
             df = loader.load_industry_data(industry_id)
@@ -153,24 +320,8 @@ def get_industry_stats(industry_id):
 
 @app.route('/industries/<industry_id>/analyze', methods=['POST'])
 def analyze_sample(industry_id):
-    """
-    Analyze a single sample from an industry
-    
-    Request body:
-    {
-        "sample": {
-            "Sample_ID": "TEST_001",
-            "BOD (mg/L)": 350,
-            "COD (mg/L)": 800,
-            "TSS (mg/L)": 120,
-            "TDS (mg/L)": 2500,
-            "pH": 7.2,
-            "Oil & Grease (mg/L)": 25
-        }
-    }
-    """
+    """Analyze a single sample from an industry"""
     data = request.get_json()
-    
     if not data:
         return jsonify({'error': 'No data provided'}), 400
     
@@ -179,28 +330,15 @@ def analyze_sample(industry_id):
         return jsonify({'error': 'Missing "sample" field'}), 400
     
     agent = get_analysis_agent()
-    
-    # Optionally load industry data for context
     agent.load_industry_data(industry_id)
-    
-    # Analyze the sample
     result = agent.analyze_sample(sample, industry_id=industry_id)
     
     return jsonify(result.to_dict())
 
 @app.route('/industries/<industry_id>/analyze/batch', methods=['POST'])
 def analyze_batch(industry_id):
-    """
-    Analyze multiple samples from an industry
-    
-    Request body:
-    {
-        "samples": [...array of samples...],
-        "limit": 100 (optional)
-    }
-    """
+    """Analyze multiple samples from an industry"""
     data = request.get_json()
-    
     if not data:
         return jsonify({'error': 'No data provided'}), 400
     
@@ -210,13 +348,9 @@ def analyze_batch(industry_id):
     if not samples:
         return jsonify({'error': 'Missing "samples" field'}), 400
     
-    # Convert to DataFrame
     df = pd.DataFrame(samples)
-    
     agent = get_analysis_agent()
     agent.load_industry_data(industry_id)
-    
-    # Analyze batch
     results = agent.analyze_dataframe(df, limit=limit)
     
     return jsonify({
@@ -227,17 +361,8 @@ def analyze_batch(industry_id):
 
 @app.route('/analyze/sample', methods=['POST'])
 def analyze_any_sample():
-    """
-    Analyze a sample without industry context
-    
-    Request body:
-    {
-        "sample": {...},
-        "industry_id": "optional_industry_id"
-    }
-    """
+    """Analyze a sample without industry context"""
     data = request.get_json()
-    
     if not data:
         return jsonify({'error': 'No data provided'}), 400
     
@@ -248,33 +373,22 @@ def analyze_any_sample():
         return jsonify({'error': 'Missing "sample" field'}), 400
     
     agent = get_analysis_agent()
-    
     if industry_id != 'unknown':
         agent.load_industry_data(industry_id)
     
     result = agent.analyze_sample(sample, industry_id=industry_id)
-    
     return jsonify(result.to_dict())
 
 # ==================== INSIGHTS ENDPOINTS ====================
 
 @app.route('/industries/<industry_id>/insights', methods=['POST'])
 def get_insights(industry_id):
-    """
-    Get natural language insights for a sample
-    
-    Request body:
-    {
-        "sample": {...} (same as analyze endpoint)
-    }
-    """
+    """Get natural language insights for a sample"""
     data = request.get_json()
-    
     if not data:
         return jsonify({'error': 'No data provided'}), 400
     
     sample = data.get('sample')
-    
     if not sample:
         return jsonify({'error': 'Missing "sample" field'}), 400
     
@@ -298,17 +412,8 @@ def get_insights(industry_id):
 
 @app.route('/analyze/with-insights', methods=['POST'])
 def analyze_with_insights():
-    """
-    Complete analysis with natural language insights
-    
-    Request body:
-    {
-        "sample": {...},
-        "industry_id": "optional_industry_id"
-    }
-    """
+    """Complete analysis with natural language insights"""
     data = request.get_json()
-    
     if not data:
         return jsonify({'error': 'No data provided'}), 400
     
@@ -348,17 +453,8 @@ def analyze_with_insights():
 
 @app.route('/insights/batch', methods=['POST'])
 def batch_insights():
-    """
-    Generate summary insights for multiple samples
-    
-    Request body:
-    {
-        "samples": [...array of analysis results...],
-        "industry_id": "optional_industry_id"
-    }
-    """
+    """Generate summary insights for multiple samples"""
     data = request.get_json()
-    
     if not data:
         return jsonify({'error': 'No data provided'}), 400
     
