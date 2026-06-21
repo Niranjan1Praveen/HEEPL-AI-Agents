@@ -1,2 +1,6 @@
-venv
+# Environment Variables
 .env
+venv/      
+# Optional
+__pycache__/  
+.DS_Store  
