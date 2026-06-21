@@ -1,0 +1,12 @@
+{
+  "sample": {
+    "Sample_ID": "TEST_001",
+    "BOD (mg/L)": 350,
+    "COD (mg/L)": 800,
+    "TSS (mg/L)": 120,
+    "TDS (mg/L)": 2500,
+    "pH": 7.2,
+    "Oil & Grease (mg/L)": 25
+  },
+  "industry_id": "dairy"
+}

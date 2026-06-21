@@ -1,0 +1,35 @@
+[33mcommit cd8e30ec0f21a1046c383b04a91c4c78605b89a4[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m
+Author: Niranjan Praveen <niranjanbpraveen@gmail.com>
+Date:   Tue Jun 2 14:18:52 2026 +0530
+
+    Added python version file
+
+[33mcommit 336ccc1ace0ec73a6919aa9332a74e92b575d821[m
+Author: Niranjan Praveen <niranjanbpraveen@gmail.com>
+Date:   Tue Jun 2 14:12:08 2026 +0530
+
+    Updated Files
+
+[33mcommit b4b6688fbe68fd568acc79a7daf9d96bb400f34e[m
+Author: Niranjan Praveen <niranjanbpraveen@gmail.com>
+Date:   Tue Jun 2 14:06:19 2026 +0530
+
+    Updated Files
+
+[33mcommit 3b226a6fe4075944c822058a5bbb86c35664988b[m
+Author: Niranjan Praveen <niranjanbpraveen@gmail.com>
+Date:   Tue Jun 2 13:59:25 2026 +0530
+
+    Added LLM Agent and fixed api problems
+
+[33mcommit 12dff65780861692708be87f4abec00bde293005[m
+Author: Niranjan Praveen <niranjanbpraveen@gmail.com>
+Date:   Fri May 22 22:59:01 2026 +0530
+
+    Added .gitignore file
+
+[33mcommit 61e35fec3cf7f3f40f932cbe5de6b0d7fa8b1c59[m
+Author: Niranjan Praveen <niranjanbpraveen@gmail.com>
+Date:   Fri May 22 22:57:48 2026 +0530
+
+    first commit
