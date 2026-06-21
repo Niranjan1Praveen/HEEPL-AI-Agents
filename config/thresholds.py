@@ -27,9 +27,9 @@ WASTEWATER_THRESHOLDS = {
         'normal': 2100.0
     },
     'pH': {
-        'critical_low': 4.0,
-        'critical_high': 10.0,
-        'warning_low': 5.5,
+        'critical_low': 5.5,
+        'critical_high': 9.5,
+        'warning_low': 6.0,
         'warning_high': 9.0,
         'normal_low': 6.5,
         'normal_high': 8.5

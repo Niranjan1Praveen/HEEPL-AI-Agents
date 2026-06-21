@@ -10,7 +10,7 @@ Uses the new google.genai package with structured schemas for reliable outputs.
 import os
 import json
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import sys
 from pydantic import BaseModel, Field
@@ -32,12 +32,65 @@ try:
 except ImportError:
     pass
 
+class ParameterTreatment(BaseModel):
+    """Per-parameter chemical treatment guidance for a single violation"""
+    parameter: str = Field(description="Parameter name, e.g. 'BOD', 'pH', 'COD'")
+    current_value: float = Field(description="The measured value of the parameter")
+    issue: str = Field(description="One sentence describing the violation and its impact for this industry")
+    chemical: str = Field(description="Specific chemical reagent with IUPAC name in parentheses, e.g. 'Lime (Ca(OH)₂)' or 'Alum (Al₂(SO₄)₃)'")
+    dosage: str = Field(description="Realistic dosage range with units scaled to the measured value, e.g. '200-400 mg/L' or '5-10 kg/m³'")
+    process: str = Field(description="Treatment unit operation and location, e.g. 'Chemical neutralization in equalization tank'")
+    expected_outcome: str = Field(description="Expected parameter value range after treatment, e.g. 'pH raised to 6.5-8.5'")
+    cost_band: str = Field(description="One of: Low, Medium, High — Low for simple pH chemicals, Medium for biological/coagulation, High for RO/advanced oxidation/ZLD")
+
+
 class InsightSchema(BaseModel):
     """Pydantic schema for structured Gemini insights output"""
     summary: str = Field(description="2-3 sentence overview of the water quality status and severity level.")
     key_findings: List[str] = Field(description="List of specific parameters exceeding thresholds, anomalies, or notable patterns.")
     recommendations: List[str] = Field(description="Actionable treatment protocols, process adjustments, or monitoring instructions.")
     severity_level: str = Field(description="One of: low, medium, high, critical")
+    parameter_treatments: Optional[List[ParameterTreatment]] = Field(
+        default=[],
+        description="Per-parameter chemical treatment guidance. Include one entry per violated parameter only. Return empty list when no violations exist."
+    )
+
+
+class EquipmentMaintenance(BaseModel):
+    """Per-equipment maintenance prescription for a Warning/Critical unit"""
+    equipment_id: str = Field(description="The equipment ID, e.g. 'pump-1'")
+    equipment_name: str = Field(description="Human-readable equipment name")
+    health_status: str = Field(description="'Warning' or 'Critical'")
+    issue: str = Field(description="Plain-language fault description, 1-2 sentences")
+    action: str = Field(description="Immediate step the maintenance engineer should take")
+    components_to_check: str = Field(description="Comma-separated list of specific parts to inspect, e.g. 'radial bearings, mechanical seal, impeller clearance, coupling alignment'")
+    estimated_downtime: str = Field(description="e.g. '4-6 hours' or 'No downtime - in-service inspection'")
+    urgency: str = Field(description="One of: Immediate, Within 24h, Schedule within 1 week, Monitor")
+    cost_band: str = Field(description="One of: Low, Medium, High")
+
+
+class MaintenanceSchema(BaseModel):
+    """Pydantic schema for structured Gemini maintenance output"""
+    fleet_summary: str = Field(description="2-3 sentence overview of the fleet health status")
+    critical_units: List[str] = Field(description="List of equipment names in Critical state")
+    maintenance_actions: Optional[List[EquipmentMaintenance]] = Field(
+        default=[],
+        description="One entry per Warning or Critical unit. Return empty list if all units are Healthy."
+    )
+    overall_recommendation: str = Field(description="Single most important action for the facility manager right now")
+    shutdown_risk: str = Field(description="One of: Low, Medium, High — likelihood of unplanned shutdown in next 7 days")
+
+
+@dataclass
+class MaintenanceResponse:
+    """Structured response from LLM maintenance analysis"""
+    fleet_summary: str
+    critical_units: List[str]
+    maintenance_actions: List[dict] = field(default_factory=list)
+    overall_recommendation: str = ""
+    shutdown_risk: str = "Low"
+    raw_response: str = ""
+
 
 @dataclass
 class LLMResponse:
@@ -47,6 +100,7 @@ class LLMResponse:
     recommendations: List[str]
     severity_level: str  # 'low', 'medium', 'high', 'critical'
     raw_response: str
+    parameter_treatments: List[dict] = field(default_factory=list)
 
 class LLMAgent:
     """
@@ -102,15 +156,15 @@ class LLMAgent:
                     self.model_name = self._find_working_model()
                 
                 if self.model_name:
-                    print(f"✅ LLM Agent initialized with {self.model_name}")
+                    print(f"[LLMAgent] Initialized with {self.model_name}")
                 else:
-                    print(f"⚠️ No working model found. Using fallback templates.")
+                    print("[LLMAgent] No working model found. Using fallback templates.")
                     self.client = None
             except Exception as e:
-                print(f"⚠️ Failed to initialize Gemini: {e}")
+                print(f"[LLMAgent] Failed to initialize Gemini: {e}")
                 self.client = None
         else:
-            print("⚠️ Gemini not available or API key missing. Using fallback templates.")
+            print("[LLMAgent] Gemini not available or API key missing. Using fallback templates.")
         
         self.industry_context = self._load_industry_context()
     
@@ -254,7 +308,8 @@ class LLMAgent:
             key_findings=data.get('key_findings', []),
             recommendations=data.get('recommendations', []),
             severity_level=severity_val,
-            raw_response=response.text
+            raw_response=response.text,
+            parameter_treatments=data.get('parameter_treatments', [])
         )
     
     def _build_prompt(self, result: Dict, industry_context: Dict, severity: str) -> str:
@@ -279,11 +334,12 @@ class LLMAgent:
             if param != 'Sample_ID' and value is not None:
                 params_text += f"- {param}: {value}\n"
                 
-        prompt = f"""You are an industrial wastewater treatment engineering expert. 
+        industry_name = industry_context.get('name', 'Unknown')
+        prompt = f"""You are an industrial wastewater treatment engineering expert specializing in {industry_name} effluent treatment.
 Analyze the following sample analysis data and supply insights.
 
 **INDUSTRY CONTEXT:**
-- Industry: {industry_context.get('name', 'Unknown')}
+- Industry: {industry_name}
 - Common issues in this sector: {', '.join(industry_context.get('common_issues', []))}
 - Standard treatment protocols: {', '.join(industry_context.get('typical_solutions', []))}
 
@@ -299,6 +355,29 @@ Analyze the following sample analysis data and supply insights.
 
 **VIOLATIONS DETECTED:**
 {violations_text}
+
+**TREATMENT GUIDANCE INSTRUCTIONS:**
+For each parameter listed in VIOLATIONS DETECTED above, populate the `parameter_treatments` array with one entry.
+Follow these rules strictly:
+- `parameter`: Use the parameter name exactly as listed (e.g. "BOD (mg/L)", "pH", "COD (mg/L)")
+- `current_value`: Use the numeric value from SAMPLE DATA
+- `issue`: One sentence specific to {industry_name} — explain why this value is problematic for this industry type
+- `chemical`: Be scientifically precise with IUPAC names in parentheses. Choose the most appropriate for {industry_name}:
+  * pH too low (acidic) → "Lime (Ca(OH)₂)" for large flows, or "Sodium Hydroxide (NaOH)" for precise control
+  * pH too high (alkaline) → "Sulfuric Acid (H₂SO₄)" diluted, or "Carbon Dioxide (CO₂) sparging" for sensitive systems
+  * High BOD → "Ferric Chloride (FeCl₃) as coagulant + activated sludge inoculation" or "Polyaluminium Chloride (PAC)"
+  * High COD (refractory) → "Fenton's Reagent (H₂O₂/FeSO₄)" or "Ozone (O₃)" for advanced oxidation
+  * High TSS → "Alum (Al₂(SO₄)₃·18H₂O)" or "Polyacrylamide (PAM) anionic flocculant"
+  * High TDS → "Reverse Osmosis (RO) membranes — no chemical addition" or "Electrodialysis (ED)"
+  * High Oil & Grease → "Cationic polymer (polyDADMAC) + Dissolved Air Flotation (DAF)"
+- `dosage`: Provide a realistic dosage range calibrated to the actual measured value and flow scale of {industry_name}. Include units (mg/L, kg/m³, etc.)
+- `process`: Name the specific unit operation and tank, e.g. "Flash mixing tank → Coagulation chamber", "Equalization tank pH correction"
+- `expected_outcome`: State the target value range after treatment, e.g. "pH corrected to 6.5–8.5", "BOD reduced to < 30 mg/L"
+- `cost_band`: Assign based on technology complexity:
+  * "Low" — simple chemical dosing (pH neutralization, basic coagulation)
+  * "Medium" — biological treatment, multi-step coagulation/flocculation, DAF
+  * "High" — Reverse Osmosis, advanced oxidation (Fenton/Ozone), ZLD, membrane bioreactors
+If there are NO violations, return an empty array [] for `parameter_treatments`.
 
 Provide your analysis strictly matching the requested JSON schema.
 """
@@ -354,7 +433,8 @@ Provide your analysis strictly matching the requested JSON schema.
             key_findings=key_findings,
             recommendations=recommendations,
             severity_level=severity,
-            raw_response=f"Template fallback response for {severity}"
+            raw_response=f"Template fallback response for {severity}",
+            parameter_treatments=[]
         )
     
     def generate_batch_insights(self, results: List[Dict], industry_id: str = None) -> str:
@@ -388,14 +468,199 @@ Provide a 2-3 sentence executive summary of the overall water quality status.
                 
         return f"📊 **Summary Report**\n\n- Total Samples: {total}\n- Critical: {critical_count} ({critical_count/total*100:.1f}%)\n- Warning: {warning_count} ({warning_count/total*100:.1f}%)\n- Anomalies: {anomaly_count}\n\n{critical_count} samples require immediate attention."
     
+    # ------------------------------------------------------------------ #
+    # Preventive maintenance LLM methods                                  #
+    # ------------------------------------------------------------------ #
+
+    def generate_maintenance_insights(self, fleet_result: dict, industry_id: str = None) -> MaintenanceResponse:
+        """Generate Gemini-powered maintenance prescriptions for the fleet analysis result."""
+        if self.client and self.model_name:
+            try:
+                return self._generate_maintenance_with_gemini(fleet_result, industry_id)
+            except Exception as e:
+                print(f"[LLMAgent] Maintenance Gemini error: {e}, using fallback")
+        return self._generate_maintenance_with_templates(fleet_result)
+
+    def _generate_maintenance_with_gemini(self, fleet_result: dict, industry_id: str = None) -> MaintenanceResponse:
+        prompt = self._build_maintenance_prompt(fleet_result, industry_id)
+        # Use mime-type only (no response_schema) — the nested EquipmentMaintenance array
+        # with $defs causes validation errors on some Gemini model variants.
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.2
+        )
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=prompt,
+            config=config
+        )
+        data = json.loads(response.text)
+        actions = []
+        for a in (data.get('maintenance_actions') or []):
+            if isinstance(a, dict):
+                actions.append(a)
+            elif hasattr(a, 'model_dump'):
+                actions.append(a.model_dump())
+        return MaintenanceResponse(
+            fleet_summary=data.get('fleet_summary', ''),
+            critical_units=data.get('critical_units', []),
+            maintenance_actions=actions,
+            overall_recommendation=data.get('overall_recommendation', ''),
+            shutdown_risk=data.get('shutdown_risk', 'Low'),
+            raw_response=response.text,
+        )
+
+    def _build_maintenance_prompt(self, fleet_result: dict, industry_id: str = None) -> str:
+        industry_name = (industry_id or fleet_result.get('industry_id', 'industrial')).replace('-', ' ').title()
+        fleet_health   = fleet_result.get('fleet_health', 'Unknown')
+        anomaly_count  = fleet_result.get('anomaly_count', 0)
+        critical_count = fleet_result.get('critical_count', 0)
+        warning_count  = fleet_result.get('warning_count', 0)
+
+        # Summarise each non-Healthy unit for the prompt
+        equipment_lines = ""
+        for eq in fleet_result.get('equipment_results', []):
+            status = eq.get('health_status', 'Healthy')
+            if status in ('Warning', 'Critical'):
+                params = eq.get('parameters', {})
+                violations = eq.get('violations', [])
+                v_text = '; '.join(v.get('message', '') for v in violations) or 'Elevated sensor readings'
+                equipment_lines += (
+                    f"- [{status}] {eq.get('equipment_name', '?')} "
+                    f"(ID: {eq.get('equipment_id', '?')}, Location: {eq.get('location', '?')})\n"
+                    f"  Parameters: sound={params.get('sound','?')} dB, "
+                    f"vibration={params.get('vibration','?')} mm/s, "
+                    f"temperature={params.get('temperature','?')} °C\n"
+                    f"  Violations: {v_text}\n"
+                    f"  Anomaly score: {eq.get('anomaly_score', 0):.3f}\n"
+                )
+
+        if not equipment_lines:
+            equipment_lines = "  All units operating within normal parameters.\n"
+
+        return f"""You are a senior rotating equipment maintenance engineer for a {industry_name} facility.
+Analyse the following ETP (Effluent Treatment Plant) equipment health data and provide structured maintenance prescriptions.
+
+**FLEET SUMMARY:**
+- Overall fleet health: {fleet_health}
+- Anomalous units detected: {anomaly_count}
+- Critical units: {critical_count}
+- Warning units: {warning_count}
+
+**EQUIPMENT REQUIRING ATTENTION:**
+{equipment_lines}
+
+**MAINTENANCE PRESCRIPTION INSTRUCTIONS:**
+For each Warning or Critical unit above, produce one entry in `maintenance_actions`:
+- `equipment_id`: exact ID as shown
+- `equipment_name`: exact name as shown
+- `health_status`: "Warning" or "Critical"
+- `issue`: 1-2 sentences — explain the fault mode implied by the sensor pattern (e.g. bearing wear, cavitation, impeller imbalance, seal failure, motor overheating)
+- `action`: Specific immediate maintenance step with ISO/maintenance engineering terminology
+- `components_to_check`: Comma-separated string of 3-5 specific parts, e.g. "radial bearings, mechanical seal, impeller clearance, coupling alignment"
+- `estimated_downtime`: Realistic estimate, e.g. "2–4 hours" (Warning) or "8–12 hours with parts on site" (Critical)
+- `urgency`:
+  * Critical → "Immediate" (shutdown now if safe) or "Within 24h"
+  * Warning → "Schedule within 1 week" or "Monitor"
+- `cost_band`:
+  * Low — lubrication service, alignment check, visual inspection
+  * Medium — bearing replacement, seal replacement, impeller inspection
+  * High — major overhaul, rotor replacement, pump replacement
+
+Return empty `maintenance_actions` array if all units are Healthy.
+Provide your response strictly in the requested JSON schema with no emojis or markdown.
+"""
+
+    def _generate_maintenance_with_templates(self, fleet_result: dict) -> MaintenanceResponse:
+        fleet_health  = fleet_result.get('fleet_health', 'Healthy')
+        critical_units = [
+            eq.get('equipment_name', '?')
+            for eq in fleet_result.get('equipment_results', [])
+            if eq.get('health_status') == 'Critical'
+        ]
+        warning_units = [
+            eq.get('equipment_name', '?')
+            for eq in fleet_result.get('equipment_results', [])
+            if eq.get('health_status') == 'Warning'
+        ]
+        if fleet_health == 'Critical':
+            fleet_summary = (
+                f"Fleet is in Critical condition — {len(critical_units)} unit(s) require immediate attention. "
+                f"Unplanned shutdown risk is elevated. Isolate affected equipment and schedule urgent maintenance."
+            )
+            shutdown_risk = "High"
+            recommendation = f"Immediately isolate and inspect: {', '.join(critical_units)}."
+        elif fleet_health == 'Warning':
+            fleet_summary = (
+                f"Fleet shows Warning-level deviations on {len(warning_units)} unit(s). "
+                f"Schedule maintenance within the next maintenance window to prevent escalation."
+            )
+            shutdown_risk = "Medium"
+            recommendation = f"Schedule inspection within 1 week for: {', '.join(warning_units)}."
+        else:
+            fleet_summary = "All equipment units are operating within normal parameters. Continue regular monitoring and preventive maintenance schedule."
+            shutdown_risk = "Low"
+            recommendation = "Maintain current lubrication and inspection intervals. No corrective action required."
+
+        actions = []
+        for eq in fleet_result.get('equipment_results', []):
+            if eq.get('health_status') in ('Warning', 'Critical'):
+                actions.append({
+                    "equipment_id":       eq.get('equipment_id', '?'),
+                    "equipment_name":     eq.get('equipment_name', '?'),
+                    "health_status":      eq.get('health_status'),
+                    "issue":              "Sensor readings indicate abnormal operating conditions.",
+                    "action":             "Perform a full inspection of bearings, seals, and impeller clearance.",
+                    "components_to_check": "bearings, mechanical seal, impeller, coupling alignment",
+                    "estimated_downtime": "4–8 hours",
+                    "urgency":            "Immediate" if eq.get('health_status') == 'Critical' else "Schedule within 1 week",
+                    "cost_band":          "Medium",
+                })
+
+        return MaintenanceResponse(
+            fleet_summary=fleet_summary,
+            critical_units=critical_units,
+            maintenance_actions=actions,
+            overall_recommendation=recommendation,
+            shutdown_risk=shutdown_risk,
+            raw_response="Template fallback",
+        )
+
+    def maintenance_to_json(self, response: MaintenanceResponse) -> Dict:
+        """Convert MaintenanceResponse to JSON-serializable dict."""
+        actions = []
+        for a in (response.maintenance_actions or []):
+            if isinstance(a, dict):
+                actions.append(a)
+            elif hasattr(a, 'model_dump'):
+                actions.append(a.model_dump())
+            else:
+                actions.append(vars(a))
+        return {
+            'fleet_summary':          response.fleet_summary,
+            'critical_units':         response.critical_units,
+            'maintenance_actions':    actions,
+            'overall_recommendation': response.overall_recommendation,
+            'shutdown_risk':          response.shutdown_risk,
+        }
+
     def to_json(self, response: LLMResponse) -> Dict:
         """Convert LLMResponse to JSON-serializable dict"""
+        treatments = []
+        for t in (response.parameter_treatments or []):
+            if isinstance(t, dict):
+                treatments.append(t)
+            elif hasattr(t, 'model_dump'):
+                treatments.append(t.model_dump())
+            else:
+                treatments.append(vars(t))
         return {
             'summary': response.summary,
             'key_findings': response.key_findings,
             'recommendations': response.recommendations,
             'severity_level': response.severity_level,
-            'raw_response': response.raw_response
+            'raw_response': response.raw_response,
+            'parameter_treatments': treatments,
         }
 
 if __name__ == "__main__":

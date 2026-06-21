@@ -27,6 +27,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from agents.analysis_agent import AnalysisAgent, AnalysisResult
 from agents.data_agent import DataAgent
 from agents.llm_agent import LLMAgent
+from agents.preventive_agent import PreventiveAgent
 from utils.csv_loader import CSVLoader
 from config.mappings import get_all_industry_ids, get_csv_path
 
@@ -41,6 +42,7 @@ CORS(app)  # Enable CORS for all routes
 _analysis_agent = None
 _data_agent = None
 _llm_agent = None
+_preventive_agent = None
 
 def get_analysis_agent():
     """Get or create AnalysisAgent instance"""
@@ -65,6 +67,14 @@ def get_llm_agent():
         _llm_agent = LLMAgent(api_key=api_key)
     return _llm_agent
 
+def get_preventive_agent():
+    """Get or create PreventiveAgent instance"""
+    global _preventive_agent
+    if _preventive_agent is None:
+        use_models = os.environ.get('USE_ML_MODELS', 'true').lower() == 'true'
+        _preventive_agent = PreventiveAgent(use_models=use_models)
+    return _preventive_agent
+
 # ==================== HEALTH & DIAGNOSTICS ====================
 
 @app.route('/health', methods=['GET'])
@@ -74,9 +84,10 @@ def health_check():
     anomaly_exists = (models_dir / "anomaly_model.pkl").exists()
     classification_exists = (models_dir / "classification_model.pkl").exists()
     forecasting_exists = (models_dir / "forecasting_models.pkl").exists()
-    
+    equipment_anomaly_exists = (models_dir / "equipment_anomaly_model.pkl").exists()
+
     api_key_configured = bool(os.environ.get('GEMINI_API_KEY'))
-    
+
     return jsonify({
         'status': 'healthy',
         'service': 'Wastewater Analysis AI Agents',
@@ -85,7 +96,8 @@ def health_check():
             'models_availability': {
                 'anomaly_model': anomaly_exists,
                 'classification_model': classification_exists,
-                'forecasting_model': forecasting_exists
+                'forecasting_model': forecasting_exists,
+                'equipment_anomaly_model': equipment_anomaly_exists,
             },
             'gemini_api_configured': api_key_configured
         }
@@ -445,7 +457,8 @@ def analyze_with_insights():
             'summary': insights.summary,
             'key_findings': insights.key_findings,
             'recommendations': insights.recommendations,
-            'severity_level': insights.severity_level
+            'severity_level': insights.severity_level,
+            'parameter_treatments': insights.parameter_treatments
         }
     })
 
@@ -556,6 +569,93 @@ def train_all():
         'status': 'completed',
         'results': results
     })
+
+# ==================== PREVENTIVE MAINTENANCE ====================
+
+@app.route('/preventive/equipment/<industry_id>', methods=['GET'])
+def get_preventive_equipment(industry_id):
+    """
+    Return the industry-specific equipment roster with ISO-standard baseline parameters.
+    Frontend uses this to seed the PreventiveCustomizer sliders.
+    """
+    try:
+        agent = get_preventive_agent()
+        roster = agent.get_equipment_roster(industry_id)
+        return jsonify({
+            'industry_id': industry_id,
+            'equipment': roster,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/preventive/analyze', methods=['POST'])
+def preventive_analyze():
+    """
+    Analyse equipment fleet health.
+
+    Request body:
+      {
+        "industry_id": str,
+        "mode": "collective" | "individual",
+        "equipment": [
+          {"id": str, "name": str, "type": "Pump"|"Blower", "location": str,
+           "parameters": {"sound": float, "vibration": float, "temperature": float}},
+          ...
+        ]
+      }
+
+    Response:
+      {
+        "industry_id": str,
+        "mode": str,
+        "fleet_health": str,
+        "anomaly_count": int,
+        "critical_count": int,
+        "warning_count": int,
+        "equipment_results": [...],
+        "insights": {
+          "fleet_summary": str,
+          "critical_units": [...],
+          "maintenance_actions": [...],
+          "overall_recommendation": str,
+          "shutdown_risk": str
+        }
+      }
+    """
+    try:
+        body = request.get_json(force=True)
+        if not body:
+            return jsonify({'error': 'Request body required'}), 400
+
+        industry_id    = body.get('industry_id', 'unknown')
+        mode           = body.get('mode', 'collective')
+        equipment_list = body.get('equipment', [])
+
+        if not equipment_list:
+            return jsonify({'error': 'equipment list is required and must not be empty'}), 400
+
+        # Run fleet analysis
+        prev_agent = get_preventive_agent()
+        fleet_result = prev_agent.analyze_fleet(industry_id, equipment_list)
+        fleet_dict   = fleet_result.to_dict()
+
+        # Generate Gemini maintenance insights
+        llm_agent = get_llm_agent()
+        maintenance_response = llm_agent.generate_maintenance_insights(fleet_dict, industry_id)
+        insights = llm_agent.maintenance_to_json(maintenance_response)
+
+        return jsonify({
+            **fleet_dict,
+            'mode':     mode,
+            'insights': insights,
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 
 # ==================== MISC ENDPOINTS ====================
 
