@@ -280,13 +280,14 @@ class LLMAgent:
         return 'low'
     
     def _generate_with_gemini(self, result: Dict, industry_context: Dict, severity: str) -> LLMResponse:
-        """Generate insights using Gemini API with strict structured schema validation"""
+        """Generate insights using Gemini API with structured JSON output.
+        Uses mime-type only (no response_schema) — InsightSchema contains
+        Optional[List[ParameterTreatment]] which generates $defs references
+        that Gemini's schema validator rejects. Schema is described in the prompt."""
         prompt = self._build_prompt(result, industry_context, severity)
-        
-        # Configure the structured JSON output config
+
         config = types.GenerateContentConfig(
             response_mime_type="application/json",
-            response_schema=InsightSchema,
             temperature=0.2
         )
         
@@ -379,7 +380,25 @@ Follow these rules strictly:
   * "High" — Reverse Osmosis, advanced oxidation (Fenton/Ozone), ZLD, membrane bioreactors
 If there are NO violations, return an empty array [] for `parameter_treatments`.
 
-Provide your analysis strictly matching the requested JSON schema.
+Respond with a single JSON object exactly matching this schema (no markdown, no extra keys):
+{{
+  "summary": "<2-3 sentence overview>",
+  "key_findings": ["<finding 1>", "<finding 2>"],
+  "recommendations": ["<action 1>", "<action 2>"],
+  "severity_level": "<low|medium|high|critical>",
+  "parameter_treatments": [
+    {{
+      "parameter": "<parameter name>",
+      "current_value": <number>,
+      "issue": "<one sentence>",
+      "chemical": "<chemical with IUPAC name>",
+      "dosage": "<range with units>",
+      "process": "<unit operation and location>",
+      "expected_outcome": "<target value range>",
+      "cost_band": "<Low|Medium|High>"
+    }}
+  ]
+}}
 """
         return prompt
     
